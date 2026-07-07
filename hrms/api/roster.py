@@ -1,6 +1,6 @@
 import frappe
 from frappe import _
-from frappe.utils import add_days, date_diff
+from frappe.utils import add_days, date_diff, getdate
 
 from erpnext.setup.doctype.employee.employee import get_holiday_list_for_employee
 
@@ -53,9 +53,9 @@ def get_events(
 ) -> dict[str, list[dict]]:
 	_validate_employee_filters(employee_filters)
 	_validate_shift_filters(shift_filters)
-	holidays = get_holidays(month_start, month_end, employee_filters)
 	leaves = get_leaves(month_start, month_end, employee_filters)
 	shifts = get_shifts(month_start, month_end, employee_filters, shift_filters)
+	holidays = get_holidays(month_start, month_end, employee_filters, shifts)
 
 	events = {}
 	for event in [holidays, leaves, shifts]:
@@ -252,7 +252,12 @@ def insert_shift(
 		create_shift_assignment(employee, company, shift_type, start_date, end_date, status, shift_location)
 
 
-def get_holidays(month_start: str, month_end: str, employee_filters: dict[str, str]) -> dict[str, list[dict]]:
+def get_holidays(
+	month_start: str,
+	month_end: str,
+	employee_filters: dict[str, str],
+	shifts: dict[str, list[dict]] | None = None,
+) -> dict[str, list[dict]]:
 	_validate_employee_filters(employee_filters)
 	holidays = {}
 	holiday_lists = {}
@@ -270,7 +275,70 @@ def get_holidays(month_start: str, month_end: str, employee_filters: dict[str, s
 			)
 		holidays[employee] = holiday_lists[holiday_list].copy()
 
+	add_shift_holidays(holidays, shifts or {}, month_start, month_end)
+
 	return holidays
+
+
+def add_shift_holidays(
+	holidays: dict[str, list[dict]], shifts: dict[str, list[dict]], month_start: str, month_end: str
+) -> None:
+	shift_types = {shift.shift_type for employee_shifts in shifts.values() for shift in employee_shifts}
+	if not shift_types:
+		return
+
+	shift_holiday_lists = dict(
+		frappe.get_all(
+			"Shift Type",
+			filters={"name": ["in", list(shift_types)], "holiday_list": ["is", "set"]},
+			fields=["name", "holiday_list"],
+			as_list=True,
+		)
+	)
+	if not shift_holiday_lists:
+		return
+
+	holiday_rows = frappe.get_all(
+		"Holiday",
+		filters={
+			"parent": ["in", list(set(shift_holiday_lists.values()))],
+			"holiday_date": ["between", [month_start, month_end]],
+		},
+		fields=["name as holiday", "parent", "holiday_date", "description", "weekly_off"],
+	)
+	holiday_map = {}
+	for holiday in holiday_rows:
+		holiday_map.setdefault(holiday.parent, {})[getdate(holiday.holiday_date)] = holiday
+
+	month_start = getdate(month_start)
+	month_end = getdate(month_end)
+
+	for employee, employee_shifts in shifts.items():
+		for shift in employee_shifts:
+			holiday_list = shift_holiday_lists.get(shift.shift_type)
+			if not holiday_list:
+				continue
+
+			start_date = max(getdate(shift.start_date), month_start)
+			end_date = min(getdate(shift.end_date) if shift.end_date else month_end, month_end)
+			for day in range(date_diff(end_date, start_date) + 1):
+				holiday_date = getdate(add_days(start_date, day))
+				if holiday := holiday_map.get(holiday_list, {}).get(holiday_date):
+					set_holiday_for_employee(holidays, employee, holiday)
+
+
+def set_holiday_for_employee(holidays: dict[str, list[dict]], employee: str, holiday: dict) -> None:
+	holidays.setdefault(employee, [])
+	if any(existing.holiday_date == holiday.holiday_date for existing in holidays[employee]):
+		return
+	holidays[employee].append(
+		{
+			"holiday": holiday.holiday,
+			"holiday_date": holiday.holiday_date,
+			"description": holiday.description,
+			"weekly_off": holiday.weekly_off,
+		}
+	)
 
 
 def get_leaves(month_start: str, month_end: str, employee_filters: dict[str, str]) -> dict[str, list[dict]]:
