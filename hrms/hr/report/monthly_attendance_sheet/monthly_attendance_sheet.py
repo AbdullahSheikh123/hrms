@@ -249,7 +249,13 @@ def get_data(filters: Filters, attendance_map: dict) -> list[dict]:
 		ungrouped_employee_details = employee_details
 
 	employee_holiday_map = get_employee_holiday_map(ungrouped_employee_details, filters)
-	shift_holiday_map = get_shift_holiday_map(attendance_map, filters)
+	employee_shift_map = get_employee_shift_map(ungrouped_employee_details, attendance_map, filters)
+	shift_names = get_shift_names_from_attendance_map(attendance_map)
+	for shifts in employee_shift_map.values():
+		shift_names.update(shifts)
+
+	shift_holiday_map = get_shift_holiday_map(shift_names, filters)
+	add_shift_holiday_rows_to_attendance_map(attendance_map, employee_shift_map, shift_holiday_map)
 	data = []
 
 	if filters.group_by:
@@ -385,6 +391,7 @@ def get_employee_related_details(filters: Filters) -> tuple[dict, list]:
 			Employee.branch,
 			Employee.company,
 			Employee.holiday_list,
+			Employee.default_shift,
 			(Employee.date_of_joining).as_("joined_date"),
 			Case()
 			.when(
@@ -494,19 +501,61 @@ def get_employee_holiday_map(employee_details: dict, filters: Filters) -> dict[s
 	return employee_holiday_map
 
 
-def get_shift_holiday_map(attendance_map: dict, filters: Filters) -> dict[str, list[dict]]:
-	if not attendance_map:
+def get_employee_shift_map(
+	employee_details: dict, attendance_map: dict, filters: Filters
+) -> dict[str, set[str]]:
+	if not employee_details or not attendance_map:
 		return {}
 
 	start_date, end_date = get_date_range_from_filters(filters)
-	shift_names = {
+	employees = [employee for employee in employee_details if employee in attendance_map]
+	if not employees:
+		return {}
+
+	employee_shift_map = {
+		employee: {details.default_shift}
+		for employee, details in employee_details.items()
+		if employee in attendance_map and details.get("default_shift")
+	}
+
+	ShiftAssignment = frappe.qb.DocType("Shift Assignment")
+	shift_assignment_rows = (
+		frappe.qb.from_(ShiftAssignment)
+		.select(ShiftAssignment.employee, ShiftAssignment.shift_type)
+		.where(ShiftAssignment.employee.isin(employees))
+		.where(ShiftAssignment.docstatus == 1)
+		.where(ShiftAssignment.status == "Active")
+		.where(ShiftAssignment.start_date <= end_date)
+		.where(
+			Criterion.any(
+				[
+					ShiftAssignment.end_date.isnull(),
+					ShiftAssignment.end_date >= start_date,
+				]
+			)
+		)
+	).run(as_dict=True)
+
+	for row in shift_assignment_rows:
+		employee_shift_map.setdefault(row.employee, set()).add(row.shift_type)
+
+	return employee_shift_map
+
+
+def get_shift_names_from_attendance_map(attendance_map: dict) -> set[str]:
+	return {
 		shift
 		for employee_attendance in attendance_map.values()
 		for shift in employee_attendance.keys()
 		if shift
 	}
+
+
+def get_shift_holiday_map(shift_names: set[str], filters: Filters) -> dict[str, list[dict]]:
 	if not shift_names:
 		return {}
+
+	start_date, end_date = get_date_range_from_filters(filters)
 
 	ShiftType = frappe.qb.DocType("Shift Type")
 	shift_rows = (
@@ -538,6 +587,18 @@ def get_shift_holiday_map(attendance_map: dict, filters: Filters) -> dict[str, l
 		for shift, holiday_list in shift_holiday_lists.items()
 		if hl_holidays.get(holiday_list)
 	}
+
+
+def add_shift_holiday_rows_to_attendance_map(
+	attendance_map: dict, employee_shift_map: dict, shift_holiday_map: dict
+) -> None:
+	for employee, shifts in employee_shift_map.items():
+		if employee not in attendance_map:
+			continue
+
+		for shift in shifts:
+			if shift in shift_holiday_map:
+				attendance_map[employee].setdefault(shift, {})
 
 
 def get_date_range_from_filters(filters: Filters) -> tuple:

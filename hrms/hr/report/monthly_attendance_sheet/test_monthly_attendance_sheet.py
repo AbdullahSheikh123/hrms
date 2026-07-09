@@ -12,7 +12,7 @@ from hrms.hr.doctype.holiday_list_assignment.test_holiday_list_assignment import
 )
 from hrms.hr.doctype.leave_allocation.leave_allocation import OverlapError
 from hrms.hr.doctype.leave_application.test_leave_application import make_allocation_record
-from hrms.hr.doctype.shift_type.test_shift_type import setup_shift_type
+from hrms.hr.doctype.shift_type.test_shift_type import make_shift_assignment, setup_shift_type
 from hrms.hr.report.monthly_attendance_sheet.monthly_attendance_sheet import execute
 from hrms.payroll.doctype.salary_slip.test_salary_slip import (
 	make_holiday_list,
@@ -790,6 +790,41 @@ class TestMonthlyAttendanceSheet(HRMSTestSuite):
 		self.assertEqual(row["shift"], shift.name)
 		self.assertEqual(row[date_key(holiday_date)], "H")
 
+	def test_shift_assignment_holiday_list_in_detailed_view_without_shift_attendance(self):
+		previous_month_first = get_first_day_for_prev_month()
+		year_start = getdate(get_year_start(previous_month_first))
+		year_end = getdate(get_year_ending(previous_month_first))
+		holiday_date = previous_month_first.replace(day=5)
+		weekly_off_date = previous_month_first.replace(day=6)
+
+		holiday_list = make_holiday_list(
+			"Test Assigned Shift Holiday List",
+			from_date=year_start,
+			to_date=year_end,
+			add_weekly_offs=False,
+		)
+		add_holiday_to_list(holiday_list, holiday_date)
+		add_holiday_to_list(holiday_list, weekly_off_date, weekly_off=1)
+		shift = setup_shift_type(shift_type="Test Assigned Shift Holiday Report", holiday_list=holiday_list)
+		frappe.db.delete("Shift Assignment", {"employee": self.employee})
+		make_shift_assignment(shift.name, self.employee, previous_month_first, add_days(previous_month_first, 30))
+
+		mark_attendance(self.employee, previous_month_first, "Present")
+
+		filters = frappe._dict(
+			{
+				"month": previous_month_first.month,
+				"year": previous_month_first.year,
+				"company": self.company,
+				"filter_based_on": "Month",
+			}
+		)
+		report = execute(filters=filters)
+		shift_row = next(row for row in report[1] if row.get("shift") == shift.name)
+
+		self.assertEqual(shift_row[date_key(holiday_date)], "H")
+		self.assertEqual(shift_row[date_key(weekly_off_date)], "WO")
+
 
 def get_leave_application(employee, date=None):
 	if not date:
@@ -833,7 +868,9 @@ def create_branch(branch_name):
 	return branch_name
 
 
-def add_holiday_to_list(holiday_list_name, holiday_date, description="Test Holiday"):
+def add_holiday_to_list(holiday_list_name, holiday_date, description="Test Holiday", weekly_off=0):
 	hl = frappe.get_doc("Holiday List", holiday_list_name)
-	hl.append("holidays", {"holiday_date": holiday_date, "description": description, "weekly_off": 0})
+	hl.append(
+		"holidays", {"holiday_date": holiday_date, "description": description, "weekly_off": weekly_off}
+	)
 	hl.save()
