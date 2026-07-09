@@ -31,6 +31,7 @@ from erpnext.accounts.utils import get_fiscal_year
 
 from hrms.payroll.doctype.salary_slip.salary_slip_loan_utils import if_lending_app_installed
 from hrms.payroll.doctype.salary_withholding.salary_withholding import link_bank_entry_in_salary_withholdings
+from hrms.utils.holiday_list import get_holiday_dates_for_employee
 
 
 class PayrollEntry(Document):
@@ -1141,7 +1142,7 @@ class PayrollEntry(Document):
 
 			start_date, end_date = self.get_payroll_dates_for_employee(details)
 			holidays = self.get_holidays_count(
-				details.holiday_list or default_holiday_list, start_date, end_date
+				emp.employee, details.holiday_list or default_holiday_list, start_date, end_date
 			)
 			payroll_days = date_diff(end_date, start_date) + 1
 			unmarked_days = payroll_days - (holidays + details.attendance_count)
@@ -1204,23 +1205,26 @@ class PayrollEntry(Document):
 
 		return start_date, end_date
 
-	def get_holidays_count(self, holiday_list: str, start_date: str, end_date: str) -> float:
+	def get_holidays_count(
+		self, employee: str, holiday_list: str, start_date: str, end_date: str
+	) -> float:
 		"""Returns number of holidays between start and end dates in the holiday list"""
 		if not hasattr(self, "_holidays_between_dates"):
 			self._holidays_between_dates = {}
 
-		key = f"{start_date}-{end_date}-{holiday_list}"
+		key = f"{employee}-{start_date}-{end_date}-{holiday_list}"
 		if key in self._holidays_between_dates:
 			return self._holidays_between_dates[key]
 
-		holidays = frappe.db.get_all(
-			"Holiday",
-			filters={"parent": holiday_list, "holiday_date": ("between", [start_date, end_date])},
-			fields=[{"COUNT": "*", "as": "holidays_count"}],
-		)[0]
+		holidays = get_holiday_dates_for_employee(
+			employee,
+			start_date,
+			end_date,
+			consider_shift_holiday_list=True,
+			fallback_holiday_list=holiday_list,
+		)
 
-		if holidays:
-			self._holidays_between_dates[key] = holidays.holidays_count
+		self._holidays_between_dates[key] = len(holidays)
 
 		return self._holidays_between_dates.get(key) or 0
 

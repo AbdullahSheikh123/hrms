@@ -13,6 +13,7 @@ from erpnext.setup.doctype.employee.test_employee import make_employee
 from hrms.hr.doctype.employee_advance.employee_advance import (
 	create_return_through_additional_salary,
 )
+from hrms.hr.doctype.shift_type.test_shift_type import setup_shift_type
 from hrms.payroll.doctype.payroll_entry.payroll_entry import (
 	PayrollEntry,
 	get_end_date,
@@ -22,6 +23,7 @@ from hrms.payroll.doctype.salary_component.test_salary_component import create_s
 from hrms.payroll.doctype.salary_slip.salary_slip_loan_utils import if_lending_app_installed
 from hrms.payroll.doctype.salary_slip.test_salary_slip import (
 	create_account,
+	make_holiday_list,
 	make_deduction_salary_component,
 	make_earning_salary_component,
 	mark_attendance,
@@ -765,6 +767,62 @@ class TestPayrollEntry(HRMSTestSuite):
 
 		employees = payroll_entry.get_employees_with_unmarked_attendance()
 		self.assertFalse(employees)
+
+	def test_validate_attendance_considers_shift_weekly_offs(self):
+		company = frappe.get_doc("Company", "_Test Company")
+		employee = make_employee("test_shift_weekoff_payroll@example.com", company=company.name)
+		setup_salary_structure(employee, company)
+
+		dates = get_start_end_dates("Monthly", nowdate())
+		weekly_off_date = add_days(dates.start_date, 3)
+
+		employee_holiday_list = make_holiday_list(
+			"Test Empty Payroll Holiday List",
+			from_date=dates.start_date,
+			to_date=dates.end_date,
+			add_weekly_offs=False,
+		)
+		shift_holiday_list = make_holiday_list(
+			"Test Payroll Shift Weekly Off List",
+			from_date=dates.start_date,
+			to_date=dates.end_date,
+			add_weekly_offs=False,
+		)
+		shift_holiday_doc = frappe.get_doc("Holiday List", shift_holiday_list)
+		shift_holiday_doc.append(
+			"holidays",
+			{"holiday_date": weekly_off_date, "description": "Shift Weekly Off", "weekly_off": 1},
+		)
+		shift_holiday_doc.save()
+
+		shift = setup_shift_type(
+			shift_type="Test Payroll Shift Weekly Off", holiday_list=shift_holiday_list
+		)
+		frappe.db.set_value(
+			"Employee",
+			employee,
+			{"holiday_list": employee_holiday_list, "default_shift": shift.name},
+		)
+
+		for date in get_date_range(dates.start_date, dates.end_date):
+			if date != weekly_off_date:
+				mark_attendance(employee, date, "Present", ignore_validate=True)
+
+		payroll_entry = get_payroll_entry(
+			start_date=dates.start_date,
+			end_date=dates.end_date,
+			payable_account=company.default_payroll_payable_account,
+			currency=company.default_currency,
+			company=company.name,
+			cost_center="Main - _TC",
+		)
+		payroll_entry.validate_attendance = True
+
+		employees = payroll_entry.get_employees_with_unmarked_attendance()
+		self.assertFalse(
+			[d for d in employees if d["employee"] == employee],
+			"Shift weekly off should not be reported as unmarked attendance.",
+		)
 
 	@HRMSTestSuite.change_settings(
 		"Payroll Settings",
